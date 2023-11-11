@@ -1,0 +1,83 @@
+{
+  "builder_name": "mslr2022",
+  "citation": "@inproceedings{DeYoung2021MS2MS,\n    title        = {MS\u02c62: Multi-Document Summarization of Medical Studies},\n    author       = {Jay DeYoung and Iz Beltagy and Madeleine van Zuylen and Bailey Kuehl and Lucy Lu Wang},\n    booktitle    = {EMNLP},\n    year         = {2021}\n}\n@article{Wallace2020GeneratingN,\n    title        = {Generating (Factual?) Narrative Summaries of RCTs: Experiments with Neural Multi-Document Summarization},\n    author       = {Byron C. Wallace and Sayantani Saha and Frank Soboczenski and Iain James Marshall},\n    year         = 2020,\n    journal      = {AMIA Annual Symposium},\n    volume       = {abs/2008.11293}\n}\n",
+  "config_name": "ms2",
+  "dataset_name": "mslr2022",
+  "dataset_size": 798826633,
+  "description": "The Multidocument Summarization for Literature Review (MSLR) Shared Task aims to study how medical\nevidence from different clinical studies are summarized in literature reviews. Reviews provide the\nhighest quality of evidence for clinical care, but are expensive to produce manually.\n(Semi-)automation via NLP may facilitate faster evidence synthesis without sacrificing rigor.\nThe MSLR shared task uses two datasets to assess the current state of multidocument summarization\nfor this task, and to encourage the development of modeling contributions, scaffolding tasks, methods\nfor model interpretability, and improved automated evaluation methods in this domain.\n",
+  "download_checksums": {
+    "https://ai2-s2-mslr.s3.us-west-2.amazonaws.com/mslr_data.tar.gz": {
+      "num_bytes": 264402799,
+      "checksum": null
+    }
+  },
+  "download_size": 264402799,
+  "features": {
+    "review_id": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "pmid": {
+      "feature": {
+        "dtype": "string",
+        "_type": "Value"
+      },
+      "_type": "Sequence"
+    },
+    "title": {
+      "feature": {
+        "dtype": "string",
+        "_type": "Value"
+      },
+      "_type": "Sequence"
+    },
+    "abstract": {
+      "feature": {
+        "dtype": "string",
+        "_type": "Value"
+      },
+      "_type": "Sequence"
+    },
+    "target": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "background": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "https://github.com/allenai/mslr-shared-task",
+  "license": "Apache-2.0",
+  "size_in_bytes": 1063229432,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 622737230,
+      "num_examples": 14188,
+      "shard_lengths": [
+        12000,
+        2188
+      ],
+      "dataset_name": "mslr2022"
+    },
+    "test": {
+      "name": "test",
+      "num_bytes": 81506673,
+      "num_examples": 1667,
+      "dataset_name": "mslr2022"
+    },
+    "validation": {
+      "name": "validation",
+      "num_bytes": 94582730,
+      "num_examples": 2021,
+      "dataset_name": "mslr2022"
+    }
+  },
+  "version": {
+    "version_str": "1.0.0",
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  }
+}
