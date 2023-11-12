@@ -5,7 +5,6 @@ __pycache__/
 
 # Jupyter Notebook
 .ipynb_checkpoints/
-*.ipynb
 *.nbconvert.ipynb
 *.nbformat.json
 *.nbsignatures.db
