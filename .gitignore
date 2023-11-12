@@ -1,0 +1,41 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+*.nbconvert.ipynb
+*.nbformat.json
+*.nbsignatures.db
+*.nbmetadata.json
+
+# Virtual environment
+venv/
+env/
+*.venv
+*.env
+
+# Logs
+*.log
+
+# Build files
+build/
+dist/
+*.egg-info/
+
+# Compiled source
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+
+# Miscellaneous
+*.DS_Store
+*.bak
+*.tmp
+*.swp
+*~
