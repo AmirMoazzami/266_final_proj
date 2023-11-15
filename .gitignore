@@ -38,3 +38,7 @@ dist/
 *.tmp
 *.swp
 *~
+
+# Project files
+evaluator/evidence_inference_models.zip
+evaluator/evidence_inference_models/**
