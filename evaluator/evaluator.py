@@ -4,14 +4,15 @@ https://github.com/allenai/mslr-shared-task/
 Copied from Evidence Inference
 """
 import itertools
+import os
 import re
-from typing import List, Optional
+from typing import List, Optional, Dict
 from dataclasses import dataclass
 
 import json
 import warnings
 import numpy as np
-from sklearn.exceptions import UndefinedMetricWarning
+
 
 import torch
 import torch.nn as nn
@@ -21,14 +22,17 @@ from torch.nn.utils.rnn import (
     pack_padded_sequence,
     pad_packed_sequence,
 )
-
+from datasets import load_dataset, Dataset
 from transformers import (
     RobertaForSequenceClassification,
     RobertaTokenizer,
     PretrainedConfig,
+    AutoTokenizer,
 )
-
+import bert_score
+from rouge_score import rouge_scorer, scoring
 from sklearn.metrics import classification_report
+from sklearn.exceptions import UndefinedMetricWarning
 from scipy.spatial.distance import jensenshannon
 
 
@@ -60,8 +64,18 @@ EXTRA_TOKENS = [
     START_EVIDENCE,
     END_EVIDENCE,
 ]
-INTERVENTION_RE = START_INTERVENTION + '(.*?)' + END_INTERVENTION
-OUTCOME_RE = START_OUTCOME + '(.*?)' + END_OUTCOME
+INTERVENTION_RE = START_INTERVENTION + "(.*?)" + END_INTERVENTION
+OUTCOME_RE = START_OUTCOME + "(.*?)" + END_OUTCOME
+
+DATASET: Dict[str, Dataset] = {}
+
+if torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+    torch.cuda.set_device(0)
+elif torch.backends.mps.is_available():
+    DEVICE = torch.device("mps")
+else:
+    DEVICE = torch.device("cpu")
 
 
 @dataclass(eq=True, frozen=True)
@@ -550,3 +564,316 @@ def clean(s):
         s = s.replace(t, "")
         s = s.replace("  ", " ")
     return s
+
+
+class MS2Evaluator:
+    def __init__(
+        self,
+        bertscore_model_type="microsoft/deberta-xlarge-mnli",
+        device=None,
+    ):
+        """
+        :param model_type: model type for BERTscore. Choose from many choices (look
+            up bert-score github). Note that MSLR/MS2 uses roberta-large in default
+            args, but https://huggingface.co/allenai/led-base-16384-ms2 uses
+            `microsoft/deberta-xlarge-mnli`. Note that `bert-score`
+            recommends `microsoft/deberta-xlarge-mnli` as the one with best
+            correlation with human judgement. Details here:
+            https://huggingface.co/microsoft/deberta-xlarge-mnli
+        """
+        self.rouge_tokenizer: Optional[AutoTokenizer] = None
+        self.bertscore_model_type = bertscore_model_type
+        self.evidence_inference_params: Optional[dict] = None
+        self.evidence_inference_tokenizer: Optional[RobertaTokenizer] = None
+        self.evidence_inference_classifier: Optional[BertClassifier] = None
+        self.evidence_classifier: Optional[BertClassifier] = None
+        self.device = device or DEVICE
+        self.results: Optional[dict] = None
+
+        self.evidence_inference_param_file = os.path.join(
+            os.path.dirname(__file__), "bert_pipeline_8samples.json"
+        )
+        self.evidence_inference_model_dir = os.path.join(
+            os.path.dirname(__file__), "evidence_inference_models"
+        )
+
+    def rouge_scores(
+        self,
+        preds: List[List[torch.Tensor]],
+        targets: List[List[torch.Tensor]],
+        tokenizer,
+        use_stemmer=False,
+        use_aggregator=False,
+    ) -> Dict:
+        # largely copied from https://github.com/huggingface/nlp/blob/master/metrics/rouge/rouge.py#L84
+        # and from https://github.com/allenai/ms2/blob/a03ab009e00c5e412b4c55f6ec4f9b49c2d8a7f6/ms2/models/utils.py
+        rouge_types = ["rouge1", "rouge2", "rougeL", "rougeLsum"]
+        scorer = rouge_scorer.RougeScorer(
+            rouge_types=rouge_types, use_stemmer=use_stemmer
+        )
+        refs, hyps = [], []
+        for p, t in zip(preds, targets):
+            assert len(p) == len(t)
+            refs.extend(p)
+            hyps.extend(t)
+
+        if use_aggregator:
+            aggregator = scoring.BootstrapAggregator()
+            scores = None
+        else:
+            aggregator = None
+            scores = []
+
+        for ref, pred in zip(refs, hyps):
+            if isinstance(ref, torch.Tensor):
+                ref = tokenizer.decode(ref).lower()
+            if isinstance(pred, torch.Tensor):
+                pred = tokenizer.decode(pred).lower()
+            score = scorer.score(ref, pred)
+            if use_aggregator:
+                aggregator.add_scores(score)
+            else:
+                scores.append(score)
+
+        if use_aggregator:
+            result = aggregator.aggregate()
+        else:
+            result = {}
+            for key in scores[0]:
+                result[key] = list(score[key] for score in scores)
+
+        return result
+
+    def get_tokenizer(self, tokenizer_type: str):
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_type, additional_special_tokens=EXTRA_TOKENS
+        )
+        return tokenizer
+
+    def calculate_rouge(
+        self, targets: Dict[str, Dict], generated: Dict[str, str]
+    ) -> Dict:
+        """
+        Calculate ROUGE scores
+        :param targets: dict of docid -> {'target': target_text}
+        :param generated: dict of docid -> generated_text
+        :return: dict of ROUGE scores (rouge1, rouge2, rougeL, rougeLsum)
+        """
+        # copied from https://github.com/allenai/mslr-shared-task/blob/c2218c1a440cf5172d784065b48af2d6c5c50f9a/evaluator/evaluator.py
+        print("Computing ROUGE scores...")
+        docids = list(targets.keys())
+        target_texts = [[targets[docid]["target"]] for docid in docids]
+        generated_texts = [[generated.get(docid, "")] for docid in docids]
+
+        # rouge scoring
+        if self.rouge_tokenizer is None:
+            self.rouge_tokenizer = self.get_tokenizer("facebook/bart-base")
+
+        rouge_results = self.rouge_scores(
+            generated_texts, target_texts, self.rouge_tokenizer, use_aggregator=True
+        )
+        self.results["rouge"] = rouge_results
+        return rouge_results
+
+    def calculate_mid_rouge(
+        self, targets: Dict[str, Dict], generated: Dict[str, str]
+    ) -> Dict:
+        """
+        Calculate ROUGE scores but only return mid F1.
+        :param targets: dict of docid -> {'target': target_text}
+        :param generated: dict of docid -> generated_text
+        :return: dict of ROUGE scores (rouge1, rouge2, rougeL, rougeLsum)
+        """
+        results = self.calculate_rouge(targets, generated)
+        ret = {
+            "rouge1": results["rouge1"].mid.fmeasure,
+            "rouge2": results["rouge2"].mid.fmeasure,
+            "rougeL": results["rougeL"].mid.fmeasure,
+            "rougeLsum": results["rougeLsum"].mid.fmeasure,
+        }
+        self.results.update(ret)
+        return ret
+
+    def calculate_bertscore(
+        self,
+        targets: Dict[str, Dict],
+        generated: Dict[str, str],
+    ) -> Dict:
+        """
+        Calculate BERTscore
+        :param targets: dict of docid -> {'target': target_text}
+        :param generated: dict of docid -> generated_text
+        :return: dict of BERTscore results (bertscore_precisions, bertscore_recalls, bertscore_f1s) (precision, recall, f1)
+        """
+        # copied from https://github.com/allenai/mslr-shared-task/blob/c2218c1a440cf5172d784065b48af2d6c5c50f9a/evaluator/evaluator.py
+        # original bert score: https://github.com/Tiiiger/bert_score
+        print("Computing BERTscore...")
+        docids = list(targets.keys())
+        target_texts = [targets[docid]["target"] for docid in docids]
+        generated_texts = [generated.get(docid, "") for docid in docids]
+
+        # BERTscore
+        bertscore_precisions, bertscore_recalls, bertscore_f1s = bert_score.score(
+            generated_texts, target_texts, model_type=self.bertscore_model_type
+        )
+        ret = {
+            "bertscore_precisions": bertscore_precisions,
+            "bertscore_recalls": bertscore_recalls,
+            "bertscore_f1s": bertscore_f1s,
+        }
+        self.results.update(ret)
+        return ret
+
+    def calculate_mean_bertscore(
+        self,
+        targets: Dict[str, Dict],
+        generated: Dict[str, str],
+        model_type="roberta-large",
+    ) -> Dict:
+        """
+        Calculate mean BERTscore
+        :param targets: dict of docid -> {'target': target_text}
+        :param generated: dict of docid -> generated_text
+        :param model_type: model type for BERTscore.
+        :return: dict of mean BERTscore results (bertscore_precisions, bertscore_recalls, bertscore_f1s) (precision, recall, f1)
+        """
+        individual_results = self.calculate_bertscore(
+            targets, generated, model_type=model_type
+        )
+
+        results = {
+            "bertscore_avg_precision": torch.mean(
+                individual_results["bertscore_precisions"]
+            ).item(),
+            "bertscore_avg_recall": torch.mean(
+                individual_results["bertscore_recalls"]
+            ).item(),
+            "bertscore_avg_f1": torch.mean(individual_results["bertscore_f1s"]).item(),
+            "bertscore_std_precision": torch.std(
+                individual_results["bertscore_precisions"]
+            ).item(),
+            "bertscore_std_recall": torch.std(
+                individual_results["bertscore_recalls"]
+            ).item(),
+            "bertscore_std_f1": torch.std(individual_results["bertscore_f1s"]).item(),
+        }
+        self.results.update(results)
+        return results
+
+    def calculate_evidence_inference_divergence(
+        self,
+        targets: Dict[str, Dict],
+        generated: Dict[str, str],
+        evidence_inference_use_unconditional: bool = False,
+    ) -> Dict:
+        """
+        Calculate Evidence Inference Divergence
+        :param targets: dict of docid -> {'target': target_text , 'preface': preface_text}
+        :param generated: dict of docid -> generated_text
+        :param ei_use_unconditional: [True/False] whether to use unconditional
+            evidence inference model
+        :return:
+        """
+        print("Computing Delta Evidence Inference scores...")
+        docids = list(targets.keys())
+        target_texts = [targets[docid]["target"] for docid in docids]
+        preface_texts = [targets[docid]["preface"] for docid in docids]
+        generated_texts = [generated.get(docid, "") for docid in docids]
+
+        generated_texts = list(map(clean, generated_texts))
+        target_texts = list(map(clean, target_texts))
+
+        # evidence inference scoring
+        with open(self.evidence_inference_param_file, "r") as inf:
+            self.evidence_inference_params = json.loads(inf.read())
+
+        if (
+            self.evidence_inference_tokenizer is None
+            or self.evidence_inference_classifier is None
+        ):
+            (
+                _,
+                self.evidence_inference_classifier,
+                _,
+                _,
+                _,
+                self.evidence_inference_tokenizer,
+            ) = initialize_models(self.evidence_inference_params)
+            if evidence_inference_use_unconditional:
+                classifier_file = os.path.join(
+                    self.evidence_inference_model_dir,
+                    "unconditioned_evidence_classifier",
+                    "unconditioned_evidence_classifier.pt",
+                )
+            else:
+                classifier_file = os.path.join(
+                    self.evidence_inference_model_dir,
+                    "evidence_classifier",
+                    "evidence_classifier.pt",
+                )
+
+            # pooler parameters are added by default in an older transformers,
+            # so we have to ignore that those are uninitialized.
+            self.evidence_inference_classifier.load_state_dict(
+                torch.load(classifier_file, map_location=self.device), strict=False
+            )
+            if self.device.type == "cuda":
+                self.evidence_inference_classifier.cuda()
+            elif self.device.type == "mps":
+                self.evidence_inference_classifier.to(self.device)
+
+        entailment_results = entailment_scores(
+            self.evidence_inference_classifier,
+            self.evidence_inference_tokenizer,
+            generated_texts,
+            target_texts,
+            preface_texts,
+            use_ios=evidence_inference_use_unconditional,
+        )
+        self.results["evidence_inference_divergence"] = entailment_results
+        return entailment_results
+
+    def load_data(self, split="validation"):
+        """
+        Load data from MSLR dataset
+        :param split: which split to load
+        :return: None
+        """
+        global DATASET
+        if split not in DATASET:
+            DATASET[split] = load_dataset("allenai/mslr2022", "ms2", split=split)
+
+        return DATASET[split]
+
+    def evaluate(
+        self,
+        generated: Dict[str, str],
+        targets: Optional[Dict[str, Dict]] = None,
+        split="validation",
+        evidence_inference_use_unconditional: bool = False,
+    ) -> Dict:
+        """
+        Evaluate generated summaries
+        :param generated: dict of docid -> generated_text
+        :param targets: dict of docid -> {'target': target_text , 'preface': preface_text}. If None, load from MSLR dataset based on `split`
+        :param split: which split to load. Only used if `targets` is None
+        :param evidence_inference_use_unconditional: [True/False] whether to use unconditional
+            evidence inference model
+        :return: dict of evaluation results
+        """
+        self.results = {}
+        if targets is None:
+            dataset = self.load_data(split=split)
+            targets = {row["review_id"]: row for row in dataset}
+
+        self.results["generated"] = generated
+        self.results["targets"] = targets
+
+        self.calculate_rouge(targets, generated)
+        self.calculate_bertscore(targets, generated)
+        self.calculate_mean_bertscore(targets, generated)
+        self.calculate_evidence_inference_divergence(
+            targets, generated, evidence_inference_use_unconditional
+        )
+
+        return self.results
