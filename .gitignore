@@ -5,7 +5,6 @@ __pycache__/
 
 # Jupyter Notebook
 .ipynb_checkpoints/
-*.ipynb
 *.nbconvert.ipynb
 *.nbformat.json
 *.nbsignatures.db
@@ -39,3 +38,7 @@ dist/
 *.tmp
 *.swp
 *~
+
+# Project files
+evaluator/evidence_inference_models.zip
+evaluator/evidence_inference_models/**
