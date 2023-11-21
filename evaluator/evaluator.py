@@ -728,7 +728,6 @@ class MS2Evaluator:
         self,
         targets: Dict[str, Dict],
         generated: Dict[str, str],
-        model_type="roberta-large",
     ) -> Dict:
         """
         Calculate mean BERTscore
@@ -737,9 +736,7 @@ class MS2Evaluator:
         :param model_type: model type for BERTscore.
         :return: dict of mean BERTscore results (bertscore_precisions, bertscore_recalls, bertscore_f1s) (precision, recall, f1)
         """
-        individual_results = self.calculate_bertscore(
-            targets, generated, model_type=model_type
-        )
+        individual_results = self.calculate_bertscore(targets, generated)
 
         results = {
             "bertscore_avg_precision": torch.mean(
@@ -777,7 +774,7 @@ class MS2Evaluator:
         print("Computing Delta Evidence Inference scores...")
         docids = list(targets.keys())
         target_texts = [targets[docid]["target"] for docid in docids]
-        preface_texts = [targets[docid]["preface"] for docid in docids]
+        preface_texts = [targets[docid]["background"] for docid in docids]
         generated_texts = [generated.get(docid, "") for docid in docids]
 
         generated_texts = list(map(clean, generated_texts))
@@ -862,15 +859,27 @@ class MS2Evaluator:
         :return: dict of evaluation results
         """
         self.results = {}
+        # ensure that generated keys are str, not int
+        generated = {str(k): v for k, v in generated.items()}
+
         if targets is None:
             dataset = self.load_data(split=split)
             targets = {row["review_id"]: row for row in dataset}
+
+            # subset targets to only ones that have generated summaries
+            targets = {k: v for k, v in targets.items() if k in generated}
+
+        else:
+            # ensure that target keys are str, not int
+            targets = {str(k): v for k, v in targets.items()}
+
+        # assert that all generated keys are in targets
+        assert set(generated.keys()) <= set(targets.keys())
 
         self.results["generated"] = generated
         self.results["targets"] = targets
 
         self.calculate_rouge(targets, generated)
-        self.calculate_bertscore(targets, generated)
         self.calculate_mean_bertscore(targets, generated)
         self.calculate_evidence_inference_divergence(
             targets, generated, evidence_inference_use_unconditional
