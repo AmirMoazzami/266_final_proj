@@ -873,8 +873,9 @@ class MS2Evaluator:
             # ensure that target keys are str, not int
             targets = {str(k): v for k, v in targets.items()}
 
-        # assert that all generated keys are in targets
-        assert set(generated.keys()) <= set(targets.keys())
+        # assert that the sets are exactly the same
+        assert set(generated.keys()) == set(targets.keys())
+        print(f"Number of generated summaries: {len(generated)}")
 
         self.results["generated"] = generated
         self.results["targets"] = targets
