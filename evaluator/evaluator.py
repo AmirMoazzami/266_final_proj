@@ -879,6 +879,7 @@ class MS2Evaluator:
 
         self.results["generated"] = generated
         self.results["targets"] = targets
+        self.results["review_ids"] = list(generated.keys())
 
         self.calculate_rouge(targets, generated)
         self.calculate_mean_bertscore(targets, generated)
