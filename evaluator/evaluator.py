@@ -10,6 +10,7 @@ from typing import List, Optional, Dict
 from dataclasses import dataclass
 
 import json
+import typing
 import warnings
 import numpy as np
 
@@ -599,48 +600,35 @@ class MS2Evaluator:
 
     def rouge_scores(
         self,
-        preds: List[List[torch.Tensor]],
-        targets: List[List[torch.Tensor]],
+        preds: List[List[str]],
+        targets: List[List[str]],
         tokenizer,
         use_stemmer=False,
-        use_aggregator=False,
-    ) -> Dict:
+    ) -> typing.Tuple[Dict, Dict]:
         # largely copied from https://github.com/huggingface/nlp/blob/master/metrics/rouge/rouge.py#L84
         # and from https://github.com/allenai/ms2/blob/a03ab009e00c5e412b4c55f6ec4f9b49c2d8a7f6/ms2/models/utils.py
         rouge_types = ["rouge1", "rouge2", "rougeL", "rougeLsum"]
         scorer = rouge_scorer.RougeScorer(
             rouge_types=rouge_types, use_stemmer=use_stemmer
         )
-        refs, hyps = [], []
-        for p, t in zip(preds, targets):
-            assert len(p) == len(t)
-            refs.extend(p)
-            hyps.extend(t)
+        targets_flattened: List[str] = []
+        predictions_flattened: List[str] = []
+        for pred, target in zip(preds, targets):
+            assert len(pred) == len(target)
+            targets_flattened.extend(target)
+            predictions_flattened.extend(pred)
 
-        if use_aggregator:
-            aggregator = scoring.BootstrapAggregator()
-            scores = None
-        else:
-            aggregator = None
-            scores = []
+        aggregator = scoring.BootstrapAggregator()
+        scores = []
 
-        for ref, pred in zip(refs, hyps):
-            if isinstance(ref, torch.Tensor):
-                ref = tokenizer.decode(ref).lower()
-            if isinstance(pred, torch.Tensor):
-                pred = tokenizer.decode(pred).lower()
+        for ref, pred in zip(targets_flattened, predictions_flattened):
             score = scorer.score(ref, pred)
-            if use_aggregator:
-                aggregator.add_scores(score)
-            else:
-                scores.append(score)
+            aggregator.add_scores(score)
+            scores.append(score)
 
-        if use_aggregator:
-            result = aggregator.aggregate()
-        else:
-            result = {}
-            for key in scores[0]:
-                result[key] = list(score[key] for score in scores)
+        result = aggregator.aggregate()
+        for key in scores[0]:
+            result[key + "_individual"] = list(score[key] for score in scores)
 
         return result
 
@@ -670,7 +658,7 @@ class MS2Evaluator:
             self.rouge_tokenizer = self.get_tokenizer("facebook/bart-base")
 
         rouge_results = self.rouge_scores(
-            generated_texts, target_texts, self.rouge_tokenizer, use_aggregator=True
+            generated_texts, target_texts, self.rouge_tokenizer
         )
         self.results["rouge"] = rouge_results
         return rouge_results
@@ -728,7 +716,6 @@ class MS2Evaluator:
         self,
         targets: Dict[str, Dict],
         generated: Dict[str, str],
-        model_type="roberta-large",
     ) -> Dict:
         """
         Calculate mean BERTscore
@@ -737,9 +724,7 @@ class MS2Evaluator:
         :param model_type: model type for BERTscore.
         :return: dict of mean BERTscore results (bertscore_precisions, bertscore_recalls, bertscore_f1s) (precision, recall, f1)
         """
-        individual_results = self.calculate_bertscore(
-            targets, generated, model_type=model_type
-        )
+        individual_results = self.calculate_bertscore(targets, generated)
 
         results = {
             "bertscore_avg_precision": torch.mean(
@@ -777,7 +762,7 @@ class MS2Evaluator:
         print("Computing Delta Evidence Inference scores...")
         docids = list(targets.keys())
         target_texts = [targets[docid]["target"] for docid in docids]
-        preface_texts = [targets[docid]["preface"] for docid in docids]
+        preface_texts = [targets[docid]["background"] for docid in docids]
         generated_texts = [generated.get(docid, "") for docid in docids]
 
         generated_texts = list(map(clean, generated_texts))
@@ -851,6 +836,7 @@ class MS2Evaluator:
         targets: Optional[Dict[str, Dict]] = None,
         split="validation",
         evidence_inference_use_unconditional: bool = False,
+        options: List[str] = ["rouge", "bertscore", "evidence_inference_divergence"],
     ) -> Dict:
         """
         Evaluate generated summaries
@@ -862,18 +848,38 @@ class MS2Evaluator:
         :return: dict of evaluation results
         """
         self.results = {}
+        # ensure that generated keys are str, not int
+        generated = {str(k): v for k, v in generated.items()}
+
         if targets is None:
             dataset = self.load_data(split=split)
             targets = {row["review_id"]: row for row in dataset}
 
+            # subset targets to only ones that have generated summaries
+            targets = {k: v for k, v in targets.items() if k in generated}
+
+        else:
+            # ensure that target keys are str, not int
+            targets = {str(k): v for k, v in targets.items()}
+
+        # assert that the sets are exactly the same
+        assert set(generated.keys()) == set(targets.keys())
+        print(f"Number of generated summaries: {len(generated)}")
+
+        # sort generated by the order observed in targets
+        generated = {k: generated[k] for k in targets.keys()}
+
         self.results["generated"] = generated
         self.results["targets"] = targets
+        self.results["review_ids"] = list(generated.keys())
 
-        self.calculate_rouge(targets, generated)
-        self.calculate_bertscore(targets, generated)
-        self.calculate_mean_bertscore(targets, generated)
-        self.calculate_evidence_inference_divergence(
-            targets, generated, evidence_inference_use_unconditional
-        )
+        if "rouge" in options:
+            self.calculate_rouge(targets, generated)
+        if "bertscore" in options:
+            self.calculate_mean_bertscore(targets, generated)
+        if "evidence_inference_divergence" in options:
+            self.calculate_evidence_inference_divergence(
+                targets, generated, evidence_inference_use_unconditional
+            )
 
         return self.results
